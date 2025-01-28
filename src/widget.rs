@@ -210,6 +210,7 @@ impl<'a> WidgetBuilder<'a> {
     }
 }
 
+#[derive(Copy, Clone)]
 pub struct Color {
     r: u8,
     g: u8,
@@ -226,6 +227,17 @@ impl From<u32> for Color {
            g: bytes[1],
            b: bytes[2],
            a: bytes[3], 
+        }
+    }
+}
+
+impl Color {
+    pub fn lerp(&self, bg: Self, value: f32) -> Self {
+        Self {
+            r: (value * self.r as f32 + (1.0 - value) * bg.r as f32).round() as u8,
+            g: (value * self.g as f32 + (1.0 - value) * bg.g as f32).round() as u8,
+            b: (value * self.b as f32 + (1.0 - value) * bg.b as f32).round() as u8,
+            a: (value * self.a as f32 + (1.0 - value) * bg.a as f32).round() as u8,
         }
     }
 }
@@ -370,23 +382,27 @@ impl<'a> Widget<'a> {
         Ok(file)
     }
 
-    pub fn draw_text(&mut self, text: String, pos: Vector2, size: f32, font: Font, color: Color) -> Result<(), WidgetError> {
+    pub fn draw_text<F: Fn(u32, char) -> Color>(&mut self, text: String, pos: Vector2, size: f32, font: Font, colorf: F, bg: Color) -> Result<(), WidgetError> {
         let mut file = self.get_buffer()?;
 
         
         let scale = Scale::uniform(size);  // Font size
         let start = point(pos.x, pos.y);     // Position to start rendering text
 
+        let mut chars = text.chars();
+
         // Render each character of the text
-        for glyph in Into::<Font>::into(font).layout(&text, scale, start) {
+        for (index, glyph) in Into::<Font>::into(font).layout(&text, scale, start).enumerate() {
+            let char = chars.next().unwrap();
             glyph.draw(|x, y, v| {
-                if v < 0.5 {
+                let rect = glyph.pixel_bounding_box().unwrap();
+                let ny = rect.min.y as i32 + y as i32;
+                let nx = rect.min.x as i32 + x as i32;
+                if ny < 0 || nx < 0 {
                     return;
                 }
-                let rect = glyph.pixel_bounding_box().unwrap();
-                let ny = rect.min.y as u32 + y;
-                let nx = rect.min.x as u32 + x;
                 let pixel_index = (ny as usize * self.width as usize + nx as usize) * 4;
+                let color = colorf(index as u32, char).lerp(bg, v);
                 if pixel_index + 4 < self.buffer.len() {
                     self.buffer[pixel_index] = color.r;     // Red
                     self.buffer[pixel_index + 1] = color.g; // Green

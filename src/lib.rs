@@ -32,7 +32,7 @@ mod tests {
     
 
         widget.draw_rect(0x00FF0000.into(), Vector2::new(0.0,0.0), Vector2::new(300.0,100.0)).unwrap();
-        widget.draw_text("Hello, World!".into(), Vector2::new(0.0, 40.0), 32.0, font, 0xFF0000FF.into()).unwrap();
+        widget.draw_text("Hello, World!".into(), Vector2::new(0.0, 40.0), 32.0, font, |_,_| 0xFF0000FF.into(), 0x00FF0000.into()).unwrap();
         //widget.draw_line(0xFF00FF00.into(), Vector2::new(0.0,0.0), Vector2::new(100.0,100.0), 10.0).unwrap();
         widget.draw_arc(0xFF00FF00.into(), Vector2::new(50.0, 50.0), 50.0, 0.0, PI, 10.0).unwrap();
 
