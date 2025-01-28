@@ -1,0 +1,16 @@
+[features]
+default = ["rusttype-reexport", "wayland-protocols-wlr-reexport"]
+rusttype-reexport = []
+wayland-protocols-wlr-reexport = []
+
+[package]
+name = "widgets"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rusttype = "0.9.3"
+tempfile = "3.15.0"
+wayland-client = "0.31.7"
+wayland-protocols = { version = "0.32.5", features = ["client"] }
+wayland-protocols-wlr = { version = "0.3.5", features = ["client"] }
