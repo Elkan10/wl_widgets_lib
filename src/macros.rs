@@ -1,13 +1,9 @@
 #[macro_export]
-macro_rules! wrap {
-    ($name:ident, $wraps:ty) => {
-        pub struct $name {
-            w: $wraps
-        }
-        impl Into<$wraps> for $name {
-            fn into(self) -> $wraps {
-                self.w
-            }
-        }
+macro_rules! reexport {
+    ($t: ty, $feature: literal) => {
+        #[cfg(feature = $feature)]
+        pub use $t;
+        #[cfg(not(feature = $feature))]
+        use $t;
     };
 }

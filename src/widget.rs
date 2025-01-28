@@ -5,16 +5,13 @@ use wayland_client::{globals::{registry_queue_init, GlobalListContents}, protoco
 use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1::ZwlrLayerShellV1, zwlr_layer_surface_v1::ZwlrLayerSurfaceV1};
 use tempfile::tempfile;
 
-#[cfg(feature = "wayland-protocols-wlr-reexport")]
-pub use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::Layer;
-#[cfg(feature = "wayland-protocols-wlr-reexport")]
-pub use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::Anchor;
-#[cfg(feature = "wayland-protocols-wlr-reexport")]
-pub use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::KeyboardInteractivity;
-#[cfg(feature = "rusttype-reexport")]
-pub use rusttype::Font;
+reexport!(wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::Layer, "wayland-protocols-wlr-reexport");
+reexport!(wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::Anchor, "wayland-protocols-wlr-reexport");
+reexport!(wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::KeyboardInteractivity, "wayland-protocols-wlr-reexport");
+reexport!(rusttype::Font, "rusttype-reexport");
 
-use crate::pixel_util::{dist_to_arc, dist_to_line, Vector2};
+
+use crate::{pixel_util::{dist_to_arc, dist_to_line, Vector2}, reexport};
 
 pub struct WidgetData;
 
@@ -141,7 +138,7 @@ pub struct WidgetBuilder<'a> {
     conn: &'a Connection,
     width: u32,
     height: u32,
-    layer: Layer,
+    layer: wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::Layer,
     anchor: Anchor,
     exclusive_edge: Anchor,
     exclusive_zone: i32,
