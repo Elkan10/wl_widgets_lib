@@ -1,9 +1,10 @@
-use std::{fmt::Display, fs::File, io::Write, os::fd::AsFd};
+use std::{any::Any, fmt::Display, fs::File, io::Write, os::fd::{AsFd, AsRawFd}, sync::{Arc, LockResult, RwLock, RwLockWriteGuard}};
 
 use rusttype::{point, Scale};
-use wayland_client::{globals::{registry_queue_init, GlobalListContents}, protocol::{wl_buffer::WlBuffer, wl_compositor::WlCompositor, wl_registry::{self, WlRegistry}, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_surface::WlSurface}, Connection, Dispatch, DispatchError, EventQueue};
+use wayland_client::{globals::{registry_queue_init, GlobalListContents}, protocol::{wl_buffer::WlBuffer, wl_compositor::WlCompositor, wl_keyboard::{KeyState, KeymapFormat, WlKeyboard}, wl_registry::{self, WlRegistry}, wl_seat::{Capability, WlSeat}, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_surface::WlSurface}, Connection, Dispatch, DispatchError, EventQueue};
 use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1::ZwlrLayerShellV1, zwlr_layer_surface_v1::ZwlrLayerSurfaceV1};
 use tempfile::tempfile;
+use xkbcommon::xkb::{self, Keycode, Keymap, Keysym};
 
 reexport!(wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::Layer, "wayland-protocols-wlr-reexport");
 reexport!(wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::Anchor, "wayland-protocols-wlr-reexport");
@@ -13,8 +14,15 @@ reexport!(rusttype::Font, "rusttype-reexport");
 
 use crate::{pixel_util::{dist_to_arc, dist_to_line, Vector2}, reexport};
 
-pub struct WidgetData;
 
+type KeyStateRc = Option<Arc<RwLock<xkb::State>>>;
+
+pub struct WidgetData {
+    key_state: KeyStateRc,
+}
+
+unsafe impl Send for WidgetData {}
+unsafe impl Sync for WidgetData {}
 
 impl Dispatch<WlRegistry, GlobalListContents> for WidgetData {
     fn event(
@@ -132,6 +140,84 @@ impl Dispatch<WlBuffer, ()> for WidgetData {
     }
 }
 
+impl Dispatch<WlSeat, Events> for WidgetData {
+    fn event(
+        state: &mut Self,
+        proxy: &WlSeat,
+        event: wayland_client::protocol::wl_seat::Event,
+        data: &Events,
+        conn: &Connection,
+        qhandle: &wayland_client::QueueHandle<Self>,
+    ) {
+        use wayland_client::protocol::wl_seat::Event;
+        println!("Seat Event!");
+        match event {
+            Event::Capabilities { capabilities } => {
+                if capabilities.into_result().unwrap().contains(Capability::Keyboard) {
+                    println!("Capabilities");
+                    proxy.get_keyboard(&qhandle, data.clone());
+                }
+            },
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<WlKeyboard, Events> for WidgetData {
+    fn event(
+        state: &mut Self,
+        proxy: &WlKeyboard,
+        event: wayland_client::protocol::wl_keyboard::Event,
+        data: &Events,
+        conn: &Connection,
+        qhandle: &wayland_client::QueueHandle<Self>,
+    ) {
+        use wayland_client::protocol::wl_keyboard::Event;
+        match event {
+            Event::Keymap { format, fd, size } => {
+                if format.into_result().unwrap() == KeymapFormat::XkbV1 {
+                    println!("XKB keyboard found!");
+                    unsafe {
+                        let map = Keymap::new_from_fd(&xkb::Context::new(0), fd, size as usize, format.into_result().unwrap().into(), 0).unwrap().unwrap();
+                        state.key_state = Some(Arc::new(RwLock::new(xkb::State::new(&map))));
+                    }
+                } else {
+                    println!("Non-XKB keyboard, disconnecting!");
+                    proxy.release();
+                }
+            },
+            Event::Key { serial, time, key, state: key_state } => {
+                let sym = state.key_state.as_ref().unwrap().read().unwrap();
+                match key_state.into_result().unwrap() {
+                    KeyState::Released => (data.key_released)(sym.key_get_one_sym(Keycode::new(key + 8)), data.comp.clone()),
+                    KeyState::Pressed => (data.key_pressed)(sym.key_get_one_sym(Keycode::new(key + 8)), data.comp.clone()),
+                    _ => {},
+                }
+            },
+            _ => {},
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct Events {
+    pub key_pressed: Arc<dyn Fn(Keysym, ComponentsRc) + Send + Sync>,
+    pub key_released: Arc<dyn Fn(Keysym, ComponentsRc) + Send + Sync>,
+    pub comp: ComponentsRc,
+}
+
+impl Events {
+    pub fn none() -> Self {
+        Self {key_pressed: Arc::new(|_,_| ()), key_released: Arc::new(|_,_| ()), comp: None}
+    }
+    pub fn new<F1: Fn(Keysym, ComponentsRc) + Send + Sync + 'static, F2: Fn(Keysym, ComponentsRc) + Send + Sync + 'static>(key_pressed: F1, key_released: F2) -> Self {
+        Self {
+            key_pressed: Arc::new(key_pressed),
+            key_released: Arc::new(key_released),
+            comp: None,
+        }
+    }
+}
 
 pub struct WidgetBuilder<'a> {
     buffer: Vec<u8>,
@@ -144,7 +230,9 @@ pub struct WidgetBuilder<'a> {
     exclusive_zone: i32,
     margin: Margin,
     kb_interactivity: KeyboardInteractivity,
+    events: Events,
 }
+
 
 
 impl<'a> WidgetBuilder<'a> {
@@ -160,6 +248,7 @@ impl<'a> WidgetBuilder<'a> {
             exclusive_zone: 0,
             margin: Margin {top: 0, bottom: 0, left: 0, right: 0},
             kb_interactivity: KeyboardInteractivity::None,
+            events: Events::none(),
         }
     }
 
@@ -188,14 +277,14 @@ impl<'a> WidgetBuilder<'a> {
         self
     }
 
-    pub fn kb_interactivity(mut self, i: KeyboardInteractivity) -> Self {
+    pub fn kb_interactivity(mut self, i: KeyboardInteractivity, e: Events) -> Self {
         self.kb_interactivity = i;
+        self.events = e;
         self
     }
 
     pub fn build(&self) -> Widget<'a> {
         Widget { 
-            buffer: vec![0u8; (self.width * self.height * 4) as usize],
             conn: self.conn, 
             width: self.width, 
             height: self.height, 
@@ -206,6 +295,7 @@ impl<'a> WidgetBuilder<'a> {
             comp: None,
             margin: self.margin,
             kb_interactivity: self.kb_interactivity,
+            events: self.events.clone(),
         }
     }
 }
@@ -286,102 +376,28 @@ pub struct WidgetComponents {
     pub surface: WlSurface,
     pub shm: WlShm,
     pub queue: EventQueue<WidgetData>,
-}
-
-pub struct Widget<'a> {
-    buffer: Vec<u8>,
-    conn: &'a Connection,
+    pub buffer: Vec<u8>,
     width: u32,
     height: u32,
-    layer: Layer,
-    anchor: Anchor,
-    exclusive_edge: Anchor,
-    exclusive_zone: i32,
-    margin: Margin,
-    kb_interactivity: KeyboardInteractivity,
-    
-    comp: Option<WidgetComponents>,    
+    data: WidgetData,
+    pub running: bool,
 }
 
-#[derive(Debug)]
-pub enum WidgetError {
-    StdIO(std::io::Error),
-    UninitializedWidget,
-    WlDispatch(DispatchError),
-}
-
-impl From<std::io::Error> for WidgetError {
-    fn from(value: std::io::Error) -> Self {
-        Self::StdIO(value)
-    }
-}
-
-impl From<DispatchError> for WidgetError {
-    fn from(value: DispatchError) -> Self {
-        Self::WlDispatch(value)
-    }
-}
-
- 
-impl Display for WidgetError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::UninitializedWidget => f.write_str("Cannot draw to uninitialized widgets!"),
-            Self::StdIO(e) => e.fmt(f),
-            Self::WlDispatch(e) => e.fmt(f)
-        }
-    }
-}
-
-
-impl std::error::Error for WidgetError {}
-
-impl<'a> Widget<'a> {
-    pub fn create_surface(&mut self, namespace: String) {
-        println!("Creating surface...");
-        let (globals, mut queue) = registry_queue_init::<WidgetData>(&self.conn).unwrap();
-        let qh = queue.handle();
-
-        queue.roundtrip(&mut WidgetData).unwrap();
-
-        let compositor : WlCompositor = globals.bind(&qh, 5..=6, ()).unwrap();
-        let layer_shell : ZwlrLayerShellV1 = globals.bind(&qh, 0..=5 , ()).unwrap();
-        let shm : WlShm = globals.bind(&qh, 0..=1, ()).unwrap();
-
-
-        let surface = compositor.create_surface(&qh, ());
-        let layer_surface = layer_shell.get_layer_surface(&surface, None, self.layer, namespace, &qh, ());
-
-
-        layer_surface.set_size(self.width, self.height);
-        layer_surface.set_anchor(self.anchor);
-        layer_surface.set_exclusive_edge(self.exclusive_edge);
-        layer_surface.set_exclusive_zone(self.exclusive_zone);
-        layer_surface.set_margin(self.margin.top as i32,self.margin.right as i32,self.margin.bottom as i32,self.margin.left as i32);
-        layer_surface.set_keyboard_interactivity(self.kb_interactivity);
-
-        surface.commit();
-        queue.roundtrip(&mut WidgetData).unwrap();
-
-        self.comp = Some(WidgetComponents { surface, shm, queue });
-
-    }
-
+impl WidgetComponents {
     fn get_buffer(&self) -> Result<File, WidgetError> {
-        let comp = self.comp.as_ref().ok_or(WidgetError::UninitializedWidget)?;
-        let qh = comp.queue.handle();
+        let qh = self.queue.handle();
         let file = tempfile()?;
-        let size = self.width * self.height * 4;
+        let size = self.buffer.len();
         file.set_len(size as u64)?;
-        let pool = comp.shm.create_pool(file.as_fd(), size as i32, &qh, ());
+        let pool = self.shm.create_pool(file.as_fd(), size as i32, &qh, ());
         let buffer = pool.create_buffer(0, self.width as i32, self.height as i32, self.width as i32 * 4, wayland_client::protocol::wl_shm::Format::Argb8888, &qh, ());
 
-        comp.surface.attach(Some(&buffer), 0, 0);
-        comp.surface.commit();
+        self.surface.attach(Some(&buffer), 0, 0);
+        self.surface.commit();
 
         Ok(file)
     }
-
+    
     pub fn draw_text<F: Fn(u32, char) -> Color>(&mut self, text: String, pos: Vector2, size: f32, font: Font, colorf: F, bg: Color) -> Result<(), WidgetError> {
         let mut file = self.get_buffer()?;
 
@@ -477,21 +493,121 @@ impl<'a> Widget<'a> {
     }
 
     pub fn close(&mut self) -> Option<()> {
-        let comp = self.comp.as_ref()?;
-        comp.surface.destroy();
-        self.comp = None;
+        self.running = false;
         Some(())
     }
 
     pub fn update(&mut self) -> Result<(), WidgetError> {
-        self.comp.as_mut().ok_or(WidgetError::UninitializedWidget)?.queue.dispatch_pending(&mut WidgetData)?;
+        self.queue.dispatch_pending(&mut self.data)?;
         Ok(())
     }
 
     pub fn update_blocking(&mut self) -> Result<(), WidgetError> {
-        self.comp.as_mut().ok_or(WidgetError::UninitializedWidget)?.queue.blocking_dispatch(&mut WidgetData)?;
+        self.queue.blocking_dispatch(&mut self.data)?;
         Ok(())
     }
+
+
+    pub fn roundtrip(&mut self) -> Result<(), WidgetError> {
+        self.queue.roundtrip(&mut self.data)?;
+        Ok(())
+    }
+}
+
+pub struct Widget<'a> {
+    conn: &'a Connection,
+    width: u32,
+    height: u32,
+    layer: Layer,
+    anchor: Anchor,
+    exclusive_edge: Anchor,
+    exclusive_zone: i32,
+    margin: Margin,
+    kb_interactivity: KeyboardInteractivity,
+    events: Events,
+    
+    pub comp: ComponentsRc,    
+}
+
+#[derive(Debug)]
+pub enum WidgetError {
+    StdIO(std::io::Error),
+    UninitializedWidget,
+    WlDispatch(DispatchError),
+}
+
+impl From<std::io::Error> for WidgetError {
+    fn from(value: std::io::Error) -> Self {
+        Self::StdIO(value)
+    }
+}
+
+impl From<DispatchError> for WidgetError {
+    fn from(value: DispatchError) -> Self {
+        Self::WlDispatch(value)
+    }
+}
+
+ 
+impl Display for WidgetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UninitializedWidget => f.write_str("Cannot draw to uninitialized widgets!"),
+            Self::StdIO(e) => e.fmt(f),
+            Self::WlDispatch(e) => e.fmt(f)
+        }
+    }
+}
+
+
+type ComponentsRc = Option<Arc<RwLock<WidgetComponents>>>;
+
+impl std::error::Error for WidgetError {}
+
+impl<'a> Widget<'a> {
+    pub fn create_surface(&mut self, namespace: String) -> Result<(), WidgetError> {
+        println!("Creating surface...");
+        let (globals, mut queue) = registry_queue_init::<WidgetData>(&self.conn).unwrap();
+        let qh = queue.handle();
+
+        let mut state = WidgetData {key_state: None};
+
+        queue.roundtrip(&mut state).unwrap();
+
+        let compositor : WlCompositor = globals.bind(&qh, 5..=6, ()).unwrap();
+        let layer_shell : ZwlrLayerShellV1 = globals.bind(&qh, 0..=5 , ()).unwrap();
+        let shm : WlShm = globals.bind(&qh, 0..=1, ()).unwrap();
+
+
+        let surface = compositor.create_surface(&qh, ());
+        let layer_surface = layer_shell.get_layer_surface(&surface, None, self.layer, namespace, &qh, ());
+
+
+        layer_surface.set_size(self.width, self.height);
+        layer_surface.set_anchor(self.anchor);
+        layer_surface.set_exclusive_edge(self.exclusive_edge);
+        layer_surface.set_exclusive_zone(self.exclusive_zone);
+        layer_surface.set_margin(self.margin.top as i32,self.margin.right as i32,self.margin.bottom as i32,self.margin.left as i32);
+        layer_surface.set_keyboard_interactivity(self.kb_interactivity);
+
+        surface.commit();
+        queue.roundtrip(&mut state).unwrap();
+
+        
+        self.comp = Some(Arc::new(RwLock::new(WidgetComponents { running: true, surface, shm, queue, buffer: vec![0u8; (self.width * self.height * 4) as usize], width: self.width, height: self.height, data: state })));
+
+        self.events.comp = self.comp.clone();
+
+        let _seat : WlSeat = globals.bind(&qh, 8..=9, self.events.clone()).unwrap();
+
+        self.comp.as_mut().unwrap().write().unwrap().roundtrip().unwrap();
+        Ok(())
+    }
+
+    pub fn get_comp(&mut self) -> LockResult<RwLockWriteGuard<WidgetComponents>> {
+        self.comp.as_mut().unwrap().write()
+    }
+
 }
 
 pub fn make_connection() -> Connection {
