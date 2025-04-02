@@ -393,6 +393,7 @@ impl WidgetComponents {
         let buffer = pool.create_buffer(0, self.width as i32, self.height as i32, self.width as i32 * 4, wayland_client::protocol::wl_shm::Format::Argb8888, &qh, ());
 
         self.surface.attach(Some(&buffer), 0, 0);
+        self.surface.damage(0, 0, self.width as i32, self.height as i32);
         self.surface.commit();
 
         Ok(file)
